@@ -1,27 +1,43 @@
 #!/usr/bin/python
 from subprocess import check_output
 import socket
-import RPi.GPIO as GPIO
 import time
 import threading
 import os
 from datetime import datetime
+from pyvesc import VESC
+import time
+import sys
 
-# pwm setup
-pwm_pin = 32
+# uart setup
+serial_port = '/dev/serial/by-id/usb-STMicroelectronics_ChibiOS_RT_Virtual_COM_Port_304-if00'
 
-GPIO.setwarnings(False)
-GPIO.setmode(GPIO.BOARD)
-GPIO.setup(pwm_pin,GPIO.OUT)
-pi_pwm = GPIO.PWM(pwm_pin,1000) # pin, 1khz
-pi_pwm.start(0)
 
 # watchdog stuff
 heartbeat = time.time()
-log_file = "logs/watchlog.log"
+log_file = "/home/niko/logs/watchlog.log"
 
+
+# setup connections
+# connect to pi pico wifi
+while True:
+    if (b"192.168.4.17" in check_output(['/sbin/ifconfig', 'wlan0'], shell=True)):
+        break
+    time.sleep(1)
+    print("waiting for link")
+
+# connect to vesc
+while True:
+    try:
+        motor = VESC(serial_port=serial_port)
+        break
+    except:
+        time.sleep(.1)
+
+
+# logging functions
 def get_temp():
-    output = check_output(["cat", "/sys/class/thermal/thermal_zone0/temp"])
+    output = check_output(["/bin/cat", "/sys/class/thermal/thermal_zone0/temp"])
     temp = int(output.decode())/1000
     return temp
 
@@ -35,6 +51,10 @@ def log(data):
 
 log("init log")
 log(get_temp())
+
+
+
+# comms functions
 # host udp server and printout all the data received
 def udp_server():
     global heartbeat
@@ -52,40 +72,47 @@ def udp_server():
         data, addr = s.recvfrom(1024)
         #print('Received from {}:{}'.format(addr[0], addr[1]))
         data = float(data.decode())
-        data += 1 # scale -1 to 1 to 0 to 2
-        data /= 2
-        data *= 100 # scale to pwm percent
-        data = int(data)
-        #data = 50
-        pi_pwm.ChangeDutyCycle(data)
-        #print(f"duty cycle: {data}")
 
+
+        # ensure that its within 0 to 1
+        if data < 0:
+            data = 0
+        if data > 1:
+            data = 1
+
+        if abs(data) < .1:
+            data = 0
+
+        #data *= 10000
+        #data = int(data)
+        #print(data)
+        motor.set_duty_cycle(data)
+
+        # allows motor to coast when not accelerating
+        if data == 0:
+            motor.set_current(0)
         heartbeat = time.time()
-        #time.sleep(10)
 
 def watchdog():
-    # definitely not safe TODO better solution
+    # restarts program when watchdog timeout
     print("Watchdog thread started")
     while True:
-        #print(time.time()-heartbeat)
-        # 50ms watchdog
         if time.time()-heartbeat > .3:
             print("Watchdog timeout")
             log("Watchdog timeout")
             log(get_temp())
-            break
+            log(check_output(['/sbin/ifconfig', 'wlan0'], shell=True).decode())
+            motor.set_current(0)
+            motor.stop_heartbeat()
 
-    while True:
-        # set pwm always to 50%
-        #pi_pwm.ChangeDutyCycle(50)
-        os._exit(1)
-
-
-while True:
-    if (b"192.168.4.17" in check_output(['/sbin/ifconfig', 'wlan0'], shell=True)):
-        break
-    time.sleep(1)
-    print("waiting for link")
+            time.sleep(1)
+            #break
+            os.execl(sys.executable, os.path.abspath(__file__), *sys.argv)
+    """
+    motor.set_rpm(0)
+    motor.stop_heartbeat()
+    os._exit(1)
+    """
 
 
 
